@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Currency Rates Downloader</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 2rem;
+    }
+    label, select, input, button {
+      margin: 0.5rem 0;
+      display: block;
+    }
+    #progressContainer {
+      margin-top: 1rem;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Currency Rates Downloader</h1>
+  <h2>As CBU has data export limits for currency exchange rate, you may find this tool helpful</h2>
+  <label for="startDate">Start Date:</label>
+  <input type="date" id="startDate" value="2022-01-01">
+  
+  <label for="endDate">End Date:</label>
+  <input type="date" id="endDate" value="2024-12-31">
+  
+  <label for="currencies">Select Currencies:</label>
+  <select id="currencies" multiple size="9">
+    <option value="USD" selected>USD</option>
+    <option value="EUR" selected>EUR</option>
+    <option value="RUB" selected>RUB</option>
+    <option value="GBR" selected>GBR</option>
+    <option value="KZT" selected>KZT</option>
+    <option value="CNY" selected>CNY</option>
+    <option value="XDR" selected>XDR</option>
+    <option value="KRW" selected>KRW</option>
+    <option value="TRY" selected>TRY</option>
+  </select>
+  
+  <button id="startButton">Start</button>
+  
+  <div id="progressContainer">
+    <p id="progressText">0 / 0 processed</p>
+    <progress id="progressBar" value="0" max="100" style="width: 100%;"></progress>
+  </div>
+
+  <script>
+    // Helper: generate an array of Date objects between start and end (inclusive)
+    function generateDates(start, end) {
+      const dates = [];
+      let current = new Date(start);
+      while (current <= end) {
+        dates.push(new Date(current));
+        current.setDate(current.getDate() + 1);
+      }
+      return dates;
+    }
+    
+    // Format date to dd.mm.yyyy
+    function formatDate(date) {
+      const day = date.getDate().toString().padStart(2, "0");
+      const month = (date.getMonth() + 1).toString().padStart(2, "0");
+      return `${day}.${month}.${date.getFullYear()}`;
+    }
+    
+    // Fetch data for one date and filter for selected currencies
+    async function fetchDataForDate(date, selectedCurrencies) {
+      const isoDate = date.toISOString().split('T')[0]; // YYYY-MM-DD
+      const url = `https://cbu.uz/uz/arkhiv-kursov-valyut/json/all/${isoDate}/`;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          console.warn(`Warning: ${isoDate} returned status ${response.status}`);
+          return [];
+        }
+        const data = await response.json();
+        const results = [];
+        const formattedDate = formatDate(date);
+        data.forEach(record => {
+          if (selectedCurrencies.has(record.Ccy)) {
+            results.push({ date: formattedDate, currency: record.Ccy, rate: record.Rate });
+          }
+        });
+        return results;
+      } catch (error) {
+        console.error(`Error on ${isoDate}:`, error);
+        return [];
+      }
+    }
+    
+    // Concurrency pool: runs iteratorFn on each item in array with at most poolLimit tasks in parallel.
+    async function asyncPool(poolLimit, array, iteratorFn, progressCallback) {
+      const ret = [];
+      const executing = [];
+      for (const item of array) {
+        const p = Promise.resolve().then(() => iteratorFn(item));
+        ret.push(p);
+        p.then(() => {
+          progressCallback();
+        });
+        if (poolLimit <= array.length) {
+          const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+          executing.push(e);
+          if (executing.length >= poolLimit) {
+            await Promise.race(executing);
+          }
+        }
+      }
+      return Promise.all(ret);
+    }
+    
+    // Build CSV content from array of objects
+    function buildCSV(data) {
+      const header = "date,currency,rate";
+      const rows = data.map(item => `${item.date},${item.currency},${item.rate}`);
+      return [header, ...rows].join("\n");
+    }
+    
+    // Trigger CSV download
+    function downloadCSV(csvContent, filename = "currency_rates.csv") {
+      const blob = new Blob([csvContent], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+    
+    // Main process when Start button is clicked
+    document.getElementById("startButton").addEventListener("click", async () => {
+      const startDateInput = document.getElementById("startDate").value;
+      const endDateInput = document.getElementById("endDate").value;
+      if (!startDateInput || !endDateInput) {
+        alert("Please select both start and end dates.");
+        return;
+      }
+      const startDate = new Date(startDateInput);
+      const endDate = new Date(endDateInput);
+      if (startDate > endDate) {
+        alert("Start date must be before end date.");
+        return;
+      }
+      
+      // Get selected currencies as a Set for faster lookup
+      const currencySelect = document.getElementById("currencies");
+      const selectedCurrencies = new Set(
+        Array.from(currencySelect.selectedOptions).map(option => option.value)
+      );
+      if (selectedCurrencies.size === 0) {
+        alert("Please select at least one currency.");
+        return;
+      }
+      
+      // Disable the button and show progress UI
+      document.getElementById("startButton").disabled = true;
+      const progressContainer = document.getElementById("progressContainer");
+      const progressBar = document.getElementById("progressBar");
+      const progressText = document.getElementById("progressText");
+      
+      const dates = generateDates(startDate, endDate);
+      const totalDates = dates.length;
+      progressBar.max = totalDates;
+      progressBar.value = 0;
+      progressText.textContent = `0 / ${totalDates} processed`;
+      progressContainer.style.display = "block";
+      
+      let completedCount = 0;
+      const updateProgress = () => {
+        completedCount++;
+        progressBar.value = completedCount;
+        progressText.textContent = `${completedCount} / ${totalDates} processed`;
+      };
+      
+      // Use asyncPool with a concurrency limit (e.g., 10 concurrent fetches)
+      const poolLimit = 10;
+      const resultsArrays = await asyncPool(poolLimit, dates, date => {
+        return fetchDataForDate(date, selectedCurrencies);
+      }, updateProgress);
+      
+      // Flatten the array of arrays
+      const results = resultsArrays.flat();
+      const csvContent = buildCSV(results);
+      downloadCSV(csvContent);
+      
+      alert("Download complete!");
+      document.getElementById("startButton").disabled = false;
+    });
+  </script>
+</body>
+</html>
